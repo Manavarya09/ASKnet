@@ -29,6 +29,9 @@ from agents.debate_coordinator import DebateCoordinator
 from agents.synthesizer_agent import SynthesizerAgent
 from agents.memory_agent import MemoryAgent
 from agents.spawner import TaskPlannerAgent, DomainSpawner
+from orchestration.manager import OrchestrationManager
+from learning.trust_scorer import TrustScorer, LearningCoordinator
+from config.settings import settings
 from .schemas import QueryRequest, QueryResponse, TaskStatus, FeedbackRequest
 
 app = FastAPI(title="ASK-Net API", version="0.1.0")
@@ -36,10 +39,10 @@ app = FastAPI(title="ASK-Net API", version="0.1.0")
 # Global state
 memory_store = MemoryStore()
 embedder = Embedder()
-vector_store = VectorStore(dimension=384)
+vector_store = VectorStore(dimension=settings.VECTOR_STORE_DIMENSION)
+
+# Initialize agents
 research_agent = ResearchAgent(vector_store, embedder)
-# Initialize data agent with the correct path to climate data
-import os
 
 # Try multiple possible paths for the dataset
 dataset_candidates = [
@@ -49,6 +52,7 @@ dataset_candidates = [
     ),
     "/app/ASKNet/data/datasets/climate_sample.csv",
     os.path.join(os.getcwd(), "ASKNet/data/datasets/climate_sample.csv"),
+    settings.CLIMATE_DATA_PATH,
 ]
 dataset_path = None
 for candidate in dataset_candidates:
@@ -59,11 +63,27 @@ for candidate in dataset_candidates:
 data_agent = DataAgent(dataset_path=dataset_path)
 prediction_agent = PredictionAgent(data_agent)
 critic_agent = CriticAgent()
-debate_coordinator = DebateCoordinator()
+debate_coordinator = DebateCoordinator(max_rounds=settings.DEBATE_MAX_ROUNDS)
 synthesizer_agent = SynthesizerAgent()
 memory_agent = MemoryAgent(memory_store)
 spawner = DomainSpawner()
 planner_agent = TaskPlannerAgent(spawner)
+
+# Initialize orchestration and learning systems
+orchestration_manager = OrchestrationManager(memory_store)
+trust_scorer = TrustScorer(
+    decay_rate=settings.TRUST_DECAY_RATE, update_factor=settings.TRUST_UPDATE_FACTOR
+)
+learning_coordinator = LearningCoordinator(trust_scorer)
+
+# Register agents with orchestration
+orchestration_manager.register_agent(research_agent)
+orchestration_manager.register_agent(data_agent)
+orchestration_manager.register_agent(prediction_agent)
+orchestration_manager.register_agent(critic_agent)
+orchestration_manager.register_agent(debate_coordinator)
+orchestration_manager.register_agent(synthesizer_agent)
+orchestration_manager.register_agent(memory_agent)
 
 # Task storage (in-memory for MVP)
 tasks: Dict[str, Dict[str, Any]] = {}
@@ -325,4 +345,96 @@ async def root():
             "Synthesizer",
             "Memory",
         ],
+        "features": [
+            "multi_agent",
+            "debate",
+            "learning",
+            "trust_scoring",
+            "domain_spawning",
+        ],
+    }
+
+
+@app.get("/agents")
+async def list_agents():
+    """List all registered agents and their trust scores."""
+    agent_info = []
+    for agent_name, agent in orchestration_manager.agents.items():
+        trust_score = trust_scorer.get_score(agent_name)
+        agent_info.append(
+            {
+                "name": agent_name,
+                "type": type(agent).__name__,
+                "trust_score": trust_score,
+            }
+        )
+
+    return {"agents": agent_info, "total": len(agent_info)}
+
+
+@app.get("/agents/{agent_name}")
+async def get_agent_info(agent_name: str):
+    """Get detailed information about an agent."""
+    if agent_name not in orchestration_manager.agents:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    agent = orchestration_manager.agents[agent_name]
+    trust_score = trust_scorer.get_score(agent_name)
+    history = trust_scorer.get_agent_history(agent_name)
+
+    return {
+        "name": agent_name,
+        "type": type(agent).__name__,
+        "trust_score": trust_score,
+        "history_length": len(history),
+        "recent_history": history[-5:] if history else [],
+    }
+
+
+@app.get("/learning/analytics")
+async def get_learning_analytics():
+    """Get learning analytics and recommendations."""
+    analysis = learning_coordinator.analyze_patterns()
+    recommendations = learning_coordinator.get_recommendations()
+    top_agents = trust_scorer.get_top_agents(limit=5)
+
+    return {
+        "analytics": analysis,
+        "recommendations": recommendations,
+        "top_agents": top_agents,
+    }
+
+
+@app.post("/orchestrate/workflow")
+async def run_workflow(workflow_config: Dict[str, Any]):
+    """Run a predefined workflow using orchestration manager."""
+    workflow_name = workflow_config.get("name", "climate_analysis")
+    inputs = workflow_config.get("inputs", {})
+
+    # Create workflow template if not exists
+    if workflow_name not in orchestration_manager.workflows:
+        orchestration_manager.create_workflow_template(
+            workflow_name, workflow_config.get("steps", [])
+        )
+
+    result = await orchestration_manager.execute_workflow(workflow_name, inputs)
+    return result
+
+
+@app.get("/tasks")
+async def list_tasks():
+    """List all tasks."""
+    return {
+        "tasks": [
+            {
+                "task_id": task_id,
+                "status": task.get("status"),
+                "query": task.get("query_text")[:100] + "..."
+                if len(task.get("query_text", "")) > 100
+                else task.get("query_text"),
+                "created_at": task.get("created_at"),
+            }
+            for task_id, task in tasks.items()
+        ],
+        "total": len(tasks),
     }
