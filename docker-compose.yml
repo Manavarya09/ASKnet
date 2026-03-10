@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: asknet
+      POSTGRES_USER: asknet
+      POSTGRES_PASSWORD: asknetpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U asknet"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "8000:80"
+    environment:
+      DATABASE_URL: postgresql://asknet:asknetpassword@postgres:5432/asknet
+      LOG_LEVEL: INFO
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./ASKNet/data:/app/data
+
+volumes:
+  postgres_data:
